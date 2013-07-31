@@ -302,6 +302,8 @@
         '../../src/extensions/gc-extension.h',
         '../../src/extensions/statistics-extension.cc',
         '../../src/extensions/statistics-extension.h',
+        '../../src/extensions/class-examiner-extension.cc',
+        '../../src/extensions/class-examiner-extension.h',
         '../../src/factory.cc',
         '../../src/factory.h',
         '../../src/fast-dtoa.cc',

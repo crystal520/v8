@@ -391,6 +391,8 @@ DEFINE_string(expose_gc_as,
 DEFINE_implication(expose_gc_as, expose_gc)
 DEFINE_bool(expose_externalize_string, false,
             "expose externalize string extension")
+DEFINE_bool(expose_class_examiner, false,
+            "expose class examiner extension")
 DEFINE_int(stack_trace_limit, 10, "number of stack frames to capture")
 DEFINE_bool(builtins_in_stack_traces, false,
             "show built-in functions in stack traces")

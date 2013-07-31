@@ -43,6 +43,7 @@
 #include "extensions/externalize-string-extension.h"
 #include "extensions/gc-extension.h"
 #include "extensions/statistics-extension.h"
+#include "extensions/class-examiner-extension.h"
 #include "code-stubs.h"
 
 #if defined(V8_I18N_SUPPORT)
@@ -106,6 +107,7 @@ void Bootstrapper::InitializeOncePerProcess() {
   GCExtension::Register();
   ExternalizeStringExtension::Register();
   StatisticsExtension::Register();
+  ClassExaminerExtension::Register();
 #if defined(V8_I18N_SUPPORT)
   v8_i18n::Extension::Register();
 #endif
@@ -2301,6 +2303,10 @@ bool Genesis::InstallExtensions(Handle<Context> native_context,
     InstallExtension(isolate, "v8/i18n", &extension_states);
   }
 #endif
+
+  if (FLAG_expose_class_examiner) {
+    InstallExtension(isolate, "v8/class-examiner", &extension_states);
+  } 
 
   if (extensions == NULL) return true;
   // Install required extensions
