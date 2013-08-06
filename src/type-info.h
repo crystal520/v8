@@ -335,7 +335,9 @@ class TypeFeedbackOracle: public ZoneObject {
 
   // Returns an element from the backing store. Returns undefined if
   // there is no information.
+ public:
   Handle<Object> GetInfo(TypeFeedbackId ast_id);
+ private:
 
   // Return the cell that contains type feedback.
   Handle<Cell> GetInfoCell(TypeFeedbackId ast_id);

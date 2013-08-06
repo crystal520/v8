@@ -54,13 +54,17 @@ class AstTyper: public AstVisitor {
 
   DEFINE_AST_VISITOR_SUBCLASS_MEMBERS();
 
- private:
+ protected:
   explicit AstTyper(CompilationInfo* info);
-
   CompilationInfo* info_;
+
+ private:
   TypeFeedbackOracle oracle_;
 
+ protected:
   TypeFeedbackOracle* oracle() { return &oracle_; }
+
+ private:
   Zone* zone() const { return info_->zone(); }
 
   void NarrowType(Expression* e, Bounds b) {
@@ -71,12 +75,15 @@ class AstTyper: public AstVisitor {
   }
 
   void VisitDeclarations(ZoneList<Declaration*>* declarations);
+
+ protected:
   void VisitStatements(ZoneList<Statement*>* statements);
 
 #define DECLARE_VISIT(type) virtual void Visit##type(type* node);
   AST_NODE_LIST(DECLARE_VISIT)
 #undef DECLARE_VISIT
 
+ private:
   DISALLOW_COPY_AND_ASSIGN(AstTyper);
 };
 
