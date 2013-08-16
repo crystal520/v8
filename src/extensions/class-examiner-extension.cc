@@ -29,6 +29,7 @@
 #include "typing.h"
 #include "parser.h"
 #include "rewriter.h"
+#include "stub-cache.h"
 
 namespace v8 {
 namespace internal {
@@ -177,14 +178,18 @@ class ICOutputer: public AstTyper {
     snprintf(int_out, std::numeric_limits<int>::digits, "%d", num);
     Write(int_out);
   }
-  void OutputMapList(SmallMapList* list) {
+  void OutputMapList(SmallMapList* list, Code::Kind kind) {
     int length = list->length();
     if (!length) {
-      Write("nothing cached (not run or not cacheable)");
+      // For Load_IC, this is probably becsue previous hidden classes are 
+      // deprecated. For Call_IC, this might be because the IC just became
+      // MEGAMORPHIC so there is nothing in the megamorphic cache. In any case,
+      // this is too complicated to explain. So, we just say
+      Write("no hidden class cached");
       return;
     }
 
-    // int dictionary_map_count = 0;
+    int dictionary_map_count = 0;
     Write(length);
     Write(" hidden classes cached (");
 
@@ -199,7 +204,7 @@ class ICOutputer: public AstTyper {
       int count = 0;
       for (int i = copied_list.length() - 1; i > -1; i--) {
         if (copied_list[i]->constructor() == fun) {
-          // if (copied_list[i]->is_dictionary_map()) dictionary_map_count++;
+          if (copied_list[i]->is_dictionary_map()) dictionary_map_count++;
           copied_list.Remove(i);
           count++;
         }
@@ -217,8 +222,10 @@ class ICOutputer: public AstTyper {
           Write(String::cast(fun_name));
         } else {
           Write("<");
+          // TODO: Use dispalyName here
           String* inferred_name = js_fun->shared()->inferred_name();
           if (inferred_name->length())
+            // TODO: This might throw because it's a cons.
             Write(inferred_name);
           else
             Write("unknown");
@@ -233,16 +240,17 @@ class ICOutputer: public AstTyper {
     }
     Write(")");
 
-    // We don't do this for now because it seems that the maps collected
-    // would never be in dictionary mode.
-
-    /*if (!dictionary_map_count) {
+    // For LOAD_IC, the type oracle don't collect dictionary maps so we don't
+    // do this here. On the other hand, VisitProperty has special check for
+    // dictionary access.
+    if (kind != Code::CALL_IC) return;
+    if (!dictionary_map_count) {
       Write(" and they are all in fast mode!");
     } else {
       Write(" and ");
       Write(dictionary_map_count);
       Write(" of them are in dictioanry mode :(");
-    }*/
+    }
   }
   virtual void VisitAssignment(Assignment* assignment) {
     AstTyper::VisitAssignment(assignment);
@@ -254,20 +262,60 @@ class ICOutputer: public AstTyper {
       Literal* lit_key = prop->key()->AsLiteral();
       ASSERT(lit_key != NULL && lit_key->value()->IsString());
       Handle<String> name = Handle<String>::cast(lit_key->value());
+      Handle<Object> object =
+        oracle()->GetInfo(assignment->AssignmentFeedbackId());
 
       Write( "* [[PUT]]('");
       Write(*name);
       Write("') : ");
-      OutputMapList(assignment->GetReceiverTypes());
+      bool is_code = object->IsCode();
+      Code* code = is_code ? Code::cast(*object) : NULL;
+      Builtins* builtins = info_->isolate()->builtins();
+      if (code == builtins->builtin(Builtins::kStoreIC_Initialize) ||
+          code == builtins->builtin(Builtins::kStoreIC_Initialize_Strict)) {
+        Write("no hidden class cached (not run)");
+      } else if
+         // StoreIC has no PREMONOMORPHIC state.
+         (code == builtins->builtin(Builtins::kStoreIC_Normal) ||
+          code == builtins->builtin(Builtins::kStoreIC_Normal_Strict)) {
+        Write("no hidden class cached (dictionary mode access)");
+      } else if
+         (code == builtins->builtin(Builtins::kStoreIC_Generic) ||
+          code == builtins->builtin(Builtins::kStoreIC_Generic_Strict)) {
+        Write("no hidden class cached (not cacheable)");
+      } else {
+        OutputMapList(assignment->GetReceiverTypes(), Code::STORE_IC);
+        if
+         (code == builtins->builtin(Builtins::kStoreIC_Megamorphic) ||
+          code == builtins->builtin(Builtins::kStoreIC_Megamorphic_Strict)) {
+          Code::Flags flags = Code::ComputeFlags(
+              Code::STORE_IC, MONOMORPHIC, Code::kNoExtraICState);
+          SmallMapList dictionary_maps;
+          info_->isolate()->stub_cache()->CollectMatchingMaps(
+              &dictionary_maps, name, flags,
+              Handle<Context>(info_->closure()->context()->native_context(),
+                              info_->isolate()),
+              info_->zone());
+          // This is inaccurate for the same reason as the case of LoadIC. See
+          // VisitProperty.
+          if (!dictionary_maps.is_empty())
+            Write(" with some dictionary objects passed through :(");
+          else
+            Write(" with no dictionary objects passed through!");
+        } else {
+          Write(" with no dictionary objects passed through!");
+        }
+       }
       Write("\n");
     }
   }
   virtual void VisitProperty(Property* prop) {
     AstTyper::VisitProperty(prop);
 
+    Handle<Object> object = oracle()->GetInfo(prop->PropertyFeedbackId());
     // VistAssignment/Call would call VisitProperty but they don't actually
     // have IC associed. This is too confusing to display so we ignore its.
-    if (oracle()->GetInfo(prop->PropertyFeedbackId())->IsUndefined()) return;
+    if (object->IsUndefined()) return;
 
     // Don't dump keyed load yet.
     if (prop->key()->IsPropertyName()) {
@@ -279,7 +327,42 @@ class ICOutputer: public AstTyper {
       Write("* [[GET]]('");
       Write(*name);
       Write("') : ");
-      OutputMapList(prop->GetReceiverTypes());
+      bool is_code = object->IsCode();
+      Code* code = is_code ? Code::cast(*object) : NULL;
+      Builtins* builtins = info_->isolate()->builtins();
+      if (code == builtins->builtin(Builtins::kLoadIC_Initialize)) {
+        Write("no hidden class cached (not run)");
+      } else if (code == builtins->builtin(Builtins::kLoadIC_PreMonomorphic)) {
+        Write("no hidden class cached (run only once)");
+      } else if (code == builtins->builtin(Builtins::kLoadIC_Normal)) {
+        Write("no hidden class cached (dictionary mode access)");
+      } else if (code == builtins->builtin(Builtins::kLoadIC_Slow)) {
+        Write("no hidden class cached (not cacheable)");
+      }
+      else {
+        OutputMapList(prop->GetReceiverTypes(), Code::LOAD_IC);
+        if (code == builtins->builtin(Builtins::kLoadIC_Megamorphic)) {
+          Code::Flags flags = Code::ComputeFlags(
+              Code::LOAD_IC, MONOMORPHIC, Code::kNoExtraICState);
+          SmallMapList dictionary_maps;
+          info_->isolate()->stub_cache()->CollectMatchingMaps(
+              &dictionary_maps, name, flags,
+              Handle<Context>(info_->closure()->context()->native_context(),
+                              info_->isolate()),
+              info_->zone());
+          // This is inaccurate for two reasons: 1) megamorphic cache is
+          // shared between different MEGAMORPHIC callsites so the "passed
+          // through" is just... a guess 2) when a kLoadIC_Normal turns
+          // into MEGAMORPHIC, that kLoadIC_Normal doesn't have an associated
+          // Handle<Name> so it can't be copied to the megamorphic cache.
+          if (!dictionary_maps.is_empty())
+            Write(" with some dictionary objects passed through :(");
+          else
+            Write(" with no dictionary objects passed through!");
+        } else {
+          Write(" with no dictionary objects passed through!");
+        }
+      }
       Write("\n");
     }
   }
@@ -292,14 +375,22 @@ class ICOutputer: public AstTyper {
       Literal* key = prop->key()->AsLiteral();
       ASSERT(key != NULL && key->value()->IsString());
       Handle<String> name = Handle<String>::cast(key->value());
+      Handle<Object> object = oracle()->GetInfo(call->CallFeedbackId());
 
       Write("* [[GET]]('");
       Write(*name);
       Write("') + [[CALL]] : ");
-      OutputMapList(call->GetReceiverTypes());
+      bool is_code = object->IsCode();
+      if (is_code && Code::cast(*object)->ic_state() == UNINITIALIZED)
+        Write("no hidden class cached (not run)");
+      else if (is_code && Code::cast(*object)->ic_state() == PREMONOMORPHIC)
+        Write("no hidden class cached (run only once)");
+      else
+        OutputMapList(call->GetReceiverTypes(), Code::CALL_IC);
       Write("\n");
     }
   }
+  // TODO: Do something about global load?
 
   Handle<SeqTwoByteString> result_;
   int* index_;
@@ -316,6 +407,7 @@ void ClassExaminerExtension::GetFunctionInfo(
   // Calculate the length of the output.
   Handle<JSFunction> fun = Utils::OpenHandle(*args[0].As<v8::Function>());
   int fun_info_len = 0;
+
   // Step 1: function header
   Object* fun_name = fun->shared()->name();
   if (fun_name->IsString() && String::cast(fun_name)->length()) {
@@ -326,17 +418,23 @@ void ClassExaminerExtension::GetFunctionInfo(
     fun_info_len += fun->shared()->inferred_name()->length();
   }
   fun_info_len += 1; // "\n"
+
   // Step 2: instructions with IC
   CompilationInfoWithZone* info = NULL;
   ICOutputer *outputer = NULL;
+  // 'functinInfo' isn't fun->IsBuiltin() nor fun->shared()->native()
+  // and I don't know why. In any case, having undefined script() would
+  // trigger an asertion when the CompilationInfo is created so we use that
+  // as the condition here.
   if (!fun->shared()->HasSourceCode()) {
-    // functinInfo isn't fun->IsBuiltin() nor fun->shared()->native()
-    // and I don't know why. In any case, having undefined script() would
-    // trigger an asertion when the CompilationInfo is created.
     fun_info_len += 10; // "(Builtin)\n"
-  } else if (fun->is_compiled()) {
+  // As long as the shared info is compiled, it doesn't matter if the Code* 
+  // the function ifself holds is Crankshafted or not becuase AstTyper
+  // analyzes the Code* on the shared info and that's always full-gen Code*.
+  } else if (fun->shared()->is_compiled()) {
     info = new CompilationInfoWithZone(fun);
-    // This does a dry run of the AST traversal and only increases fun_info_len.
+    // This is a dry that doesn't write the string but builds the AST and
+    // increases fun_info_len.
     outputer = new(info->zone()) ICOutputer(info, Handle<SeqTwoByteString>(),
                                             &fun_info_len);
   } else {
@@ -350,6 +448,7 @@ void ClassExaminerExtension::GetFunctionInfo(
         isolate->factory()->NewRawTwoByteString(fun_info_len);
   int index = 0;
   DisallowHeapAllocation no_allocation;
+
   // Step 1: function header
   if (fun_name->IsString() && String::cast(fun_name)->length()) {
     Write(result, index, "Function: ");
@@ -366,6 +465,7 @@ void ClassExaminerExtension::GetFunctionInfo(
     Write(result, index, '>');
   }
   Write(result, index, '\n');
+
   // Step 2: instructions with IC
   if (!fun->shared()->HasSourceCode()) {
     Write(result, index, "(Builtin)\n");
