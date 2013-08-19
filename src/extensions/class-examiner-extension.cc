@@ -232,12 +232,17 @@ class ICOutputer: public AstTyper {
 
       if (!fun->IsNull()) {
         JSFunction* js_fun = JSFunction::cast(fun);
+        Handle<Object> displayName =
+          GetProperty(Handle<JSFunction>(js_fun, info_->isolate()),
+                      "displayName");
         Object* fun_name = js_fun->shared()->name();
-        if (fun_name->IsString() && String::cast(fun_name)->length()) {
+        // Use "displayName" if it's available as a String*.
+        if (displayName->IsString()) {
+          Write(*Handle<String>::cast(displayName));
+        } else if (fun_name->IsString() && String::cast(fun_name)->length()) {
           Write(String::cast(fun_name));
         } else {
           Write("<");
-          // TODO: Use dispalyName here
           String* inferred_name = js_fun->shared()->inferred_name();
           if (inferred_name->length())
             Write(inferred_name);
@@ -429,8 +434,13 @@ void ClassExaminerExtension::GetFunctionInfo(
   int fun_info_len = 0;
 
   // Step 1: function header
+  Handle<Object> displayName = GetProperty(fun, "displayName");
   Object* fun_name = fun->shared()->name();
-  if (fun_name->IsString() && String::cast(fun_name)->length()) {
+  // Use "displayName" if it's available as a String*.
+  if (displayName->IsString()) {
+    fun_info_len += 10; // "Function: %s"
+    fun_info_len += Handle<String>::cast(displayName)->length();
+  } else if (fun_name->IsString() && String::cast(fun_name)->length()) {
     fun_info_len += 10; // "Function: %s"
     fun_info_len += String::cast(fun_name)->length();
   } else {
@@ -470,7 +480,10 @@ void ClassExaminerExtension::GetFunctionInfo(
   DisallowHeapAllocation no_allocation;
 
   // Step 1: function header
-  if (fun_name->IsString() && String::cast(fun_name)->length()) {
+  if (displayName->IsString()) {
+    Write(result, index, "Function: ");
+    Write(result, index, String::cast(*displayName));
+  } else if (fun_name->IsString() && String::cast(fun_name)->length()) {
     Write(result, index, "Function: ");
     Write(result, index, String::cast(fun_name));
   } else {
