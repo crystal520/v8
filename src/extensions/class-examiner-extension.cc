@@ -178,21 +178,29 @@ class ICOutputer: public AstTyper {
     snprintf(int_out, std::numeric_limits<int>::digits, "%d", num);
     Write(int_out);
   }
-  void OutputMapList(SmallMapList* list, Code::Kind kind) {
+  // This function outputs things like (A x 1, B x 2, ...) in the order of the
+  // the list. When count_dict is true, it is followed by "x of them are in
+  // dictionary mode". When output_length is true, it is preceded by "x hidden
+  // classes cached".
+  void OutputMapList(SmallMapList* list, bool output_length, bool count_dict) {
     int length = list->length();
-    if (!length) {
-      // For Load_IC, this is probably becsue previous hidden classes are 
-      // deprecated. For Call_IC, this might be because the IC just became
-      // MEGAMORPHIC so there is nothing in the megamorphic cache. In any case,
-      // this is too complicated to explain. So, we just say
-      Write("no hidden class cached");
-      return;
+    if (output_length) {
+      if (!length) {
+        // For Load_IC, this is probably becsue previous hidden classes are
+        // deprecated. For Call_IC, this might be because the IC just became
+        // MEGAMORPHIC so there is nothing in the megamorphic cache. In any
+        // case, this is too complicated to explain. So, we just say
+        Write("no hidden class cached");
+        return;
+      }
+      else {
+        Write(length);
+        Write(" hidden classes cached ");
+      }
     }
 
-    int dictionary_map_count = 0;
-    Write(length);
-    Write(" hidden classes cached (");
-
+    SmallMapList dictionary_maps;
+    Write("(");
     ZoneList<Handle<Map> > copied_list(length, info_->zone());
     for (int i = 0; i < length; i++)
       copied_list.Add(list->at(i), info_->zone());
@@ -204,7 +212,8 @@ class ICOutputer: public AstTyper {
       int count = 0;
       for (int i = copied_list.length() - 1; i > -1; i--) {
         if (copied_list[i]->constructor() == fun) {
-          if (copied_list[i]->is_dictionary_map()) dictionary_map_count++;
+          if (copied_list[i]->is_dictionary_map())
+            dictionary_maps.Add(copied_list[i], info_->zone());
           copied_list.Remove(i);
           count++;
         }
@@ -240,16 +249,53 @@ class ICOutputer: public AstTyper {
     }
     Write(")");
 
-    // For LOAD_IC, the type oracle don't collect dictionary maps so we don't
-    // do this here. On the other hand, VisitProperty has special check for
-    // dictionary access.
-    if (kind != Code::CALL_IC) return;
-    if (!dictionary_map_count) {
+    // For LOAD_IC/STORE_IC, the type oracle don't collect dictionary maps so
+    // we don't do this here. On the other hand, they have extra check for 
+    // dictionary access. See below
+    if (!count_dict) return;
+    if (dictionary_maps.is_empty()) {
       Write(" and they are all in fast mode!");
     } else {
       Write(" and ");
-      Write(dictionary_map_count);
-      Write(" of them are in dictioanry mode :(");
+      Write(dictionary_maps.length());
+      Write(" of them are in dictioanry mode ");
+      OutputMapList(&dictionary_maps, false, false);
+      Write(" :(");
+    }
+  }
+  // For MEGAMORPHIC ic, this function guesses whether there have been
+  // dictioanry objects passed by. This is inaccurate for three reasons: 1)
+  // megamorphic cache is shared between different MEGAMORPHIC callsites so the
+  // "passed through" is just... a guess 2) when a kLoadIC_Normal turns into
+  // MEGAMORPHIC, that kLoadIC_Normal doesn't have an associated Handle<Name>
+  // so it can't be copied to the megamorphic cache. 3) hash collision :(
+  void OutputPassedByDictionaryMaps(Handle<String> name, Code::Kind kind) {
+    Code::Flags flags =
+      Code::ComputeFlags(kind, MONOMORPHIC, Code::kNoExtraICState);
+    SmallMapList potential_dictionary_maps;
+    info_->isolate()->stub_cache()->CollectMatchingMaps(
+       &potential_dictionary_maps, name, flags,
+       Handle<Context>(info_->closure()->context()->native_context(),
+       info_->isolate()), info_->zone());
+    int length = potential_dictionary_maps.length();
+
+    // Sometimes CollectMatchingMaps would match Code*'s with a different flag
+    // , say, STUB, becasue of hash collision and the corresponding Map* would
+    // not be a dictionary map. We remove those maps from the list to workaround
+    // this situation.
+    SmallMapList dictionary_maps(length, info_->zone());
+    for (int i = 0; i < length; i++) {
+      if (potential_dictionary_maps.at(i)->is_dictionary_map())
+        dictionary_maps.Add(potential_dictionary_maps.at(i),
+                            info_->zone());
+    }
+    if (!dictionary_maps.is_empty()) {
+      Write(" with some dictionary objects passed through ");
+      OutputMapList(&dictionary_maps, false, false);
+      Write(" :(");
+    }
+    else {
+      Write(" with no dictionary objects passed through!");
     }
   }
   virtual void VisitAssignment(Assignment* assignment) {
@@ -284,27 +330,13 @@ class ICOutputer: public AstTyper {
           code == builtins->builtin(Builtins::kStoreIC_Generic_Strict)) {
         Write("no hidden class cached (not cacheable)");
       } else {
-        OutputMapList(assignment->GetReceiverTypes(), Code::STORE_IC);
+        OutputMapList(assignment->GetReceiverTypes(), true, false);
         if
          (code == builtins->builtin(Builtins::kStoreIC_Megamorphic) ||
-          code == builtins->builtin(Builtins::kStoreIC_Megamorphic_Strict)) {
-          Code::Flags flags = Code::ComputeFlags(
-              Code::STORE_IC, MONOMORPHIC, Code::kNoExtraICState);
-          SmallMapList dictionary_maps;
-          info_->isolate()->stub_cache()->CollectMatchingMaps(
-              &dictionary_maps, name, flags,
-              Handle<Context>(info_->closure()->context()->native_context(),
-                              info_->isolate()),
-              info_->zone());
-          // This is inaccurate for the same reason as the case of LoadIC. See
-          // VisitProperty.
-          if (!dictionary_maps.is_empty())
-            Write(" with some dictionary objects passed through :(");
-          else
-            Write(" with no dictionary objects passed through!");
-        } else {
+          code == builtins->builtin(Builtins::kStoreIC_Megamorphic_Strict))
+          OutputPassedByDictionaryMaps(name, Code::STORE_IC);
+        else
           Write(" with no dictionary objects passed through!");
-        }
        }
       Write("\n");
     }
@@ -340,28 +372,11 @@ class ICOutputer: public AstTyper {
         Write("no hidden class cached (not cacheable)");
       }
       else {
-        OutputMapList(prop->GetReceiverTypes(), Code::LOAD_IC);
-        if (code == builtins->builtin(Builtins::kLoadIC_Megamorphic)) {
-          Code::Flags flags = Code::ComputeFlags(
-              Code::LOAD_IC, MONOMORPHIC, Code::kNoExtraICState);
-          SmallMapList dictionary_maps;
-          info_->isolate()->stub_cache()->CollectMatchingMaps(
-              &dictionary_maps, name, flags,
-              Handle<Context>(info_->closure()->context()->native_context(),
-                              info_->isolate()),
-              info_->zone());
-          // This is inaccurate for two reasons: 1) megamorphic cache is
-          // shared between different MEGAMORPHIC callsites so the "passed
-          // through" is just... a guess 2) when a kLoadIC_Normal turns
-          // into MEGAMORPHIC, that kLoadIC_Normal doesn't have an associated
-          // Handle<Name> so it can't be copied to the megamorphic cache.
-          if (!dictionary_maps.is_empty())
-            Write(" with some dictionary objects passed through :(");
-          else
-            Write(" with no dictionary objects passed through!");
-        } else {
+        OutputMapList(prop->GetReceiverTypes(), true, false);
+        if (code == builtins->builtin(Builtins::kLoadIC_Megamorphic))
+          OutputPassedByDictionaryMaps(name, Code::LOAD_IC);
+        else
           Write(" with no dictionary objects passed through!");
-        }
       }
       Write("\n");
     }
@@ -386,7 +401,7 @@ class ICOutputer: public AstTyper {
       else if (is_code && Code::cast(*object)->ic_state() == PREMONOMORPHIC)
         Write("no hidden class cached (run only once)");
       else
-        OutputMapList(call->GetReceiverTypes(), Code::CALL_IC);
+        OutputMapList(call->GetReceiverTypes(), true, true);
       Write("\n");
     }
   }
