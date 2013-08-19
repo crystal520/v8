@@ -155,20 +155,26 @@ class ICOutputer: public AstTyper {
     }
   }
   inline void Write(String* string) {
-    ASSERT(string->IsFlat());
+    // Don't create handles during the dry run.
     int length = string->length();
-
     if (result_.is_null()) {
       *index_ += length;
       return;
     }
 
-    if (string->IsOneByteRepresentationUnderneath()) {
-      Vector<const uint8_t> vector = GetCharVector<uint8_t>(string);
+    Handle<String> flattened;
+    {
+      AllowHeapAllocation some_allocation;
+      flattened = FlattenGetString(Handle<String>(string, info_->isolate()));
+    }
+    ASSERT(flattened->IsFlat());
+
+    if (flattened->IsOneByteRepresentationUnderneath()) {
+      Vector<const uint8_t> vector = GetCharVector<uint8_t>(*flattened);
       for (int i = 0; i < length; i++)
         result_->SeqTwoByteStringSet((*index_)++, vector[i]);
     } else {
-      Vector<const uint16_t> vector = GetCharVector<uint16_t>(string);
+      Vector<const uint16_t> vector = GetCharVector<uint16_t>(*flattened);
       for (int i = 0; i < length; i++)
         result_->SeqTwoByteStringSet((*index_)++, vector[i]);
     }
@@ -234,7 +240,6 @@ class ICOutputer: public AstTyper {
           // TODO: Use dispalyName here
           String* inferred_name = js_fun->shared()->inferred_name();
           if (inferred_name->length())
-            // TODO: This might throw because it's a cons.
             Write(inferred_name);
           else
             Write("unknown");
@@ -250,7 +255,7 @@ class ICOutputer: public AstTyper {
     Write(")");
 
     // For LOAD_IC/STORE_IC, the type oracle don't collect dictionary maps so
-    // we don't do this here. On the other hand, they have extra check for 
+    // we don't do this here. On the other hand, they have extra check for
     // dictionary access. See below
     if (!count_dict) return;
     if (dictionary_maps.is_empty()) {
@@ -443,7 +448,7 @@ void ClassExaminerExtension::GetFunctionInfo(
   // as the condition here.
   if (!fun->shared()->HasSourceCode()) {
     fun_info_len += 10; // "(Builtin)\n"
-  // As long as the shared info is compiled, it doesn't matter if the Code* 
+  // As long as the shared info is compiled, it doesn't matter if the Code*
   // the function ifself holds is Crankshafted or not becuase AstTyper
   // analyzes the Code* on the shared info and that's always full-gen Code*.
   } else if (fun->shared()->is_compiled()) {
